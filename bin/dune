@@ -1,0 +1,5 @@
+(executable
+ (public_name siesta)
+ (name main)
+ (libraries siesta cmdliner lwt lwt_ppx)
+ (preprocess (pps lwt_ppx)))
