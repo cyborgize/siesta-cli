@@ -220,26 +220,26 @@ let siesta_t =
   let (let+) x f = Term.(const f $ x) in
   let (and+) x y = Term.(const (fun x y -> x, y) $ x $ y) in
   let+
-    authentication and+
-    authentication_pass and+
-    base_uri and+
-    bearer and+
-    bearer_pass and+
-    content and+
-    content_type and+
-    data and+
-    digest and+
-    dry_run and+
-    json and+
-    pass and+
-    path and+
-    query and+
-    raw_form and+
-    raw_path and+
-    raw_query and+
-    user and+
-    user_pass and+
-    verb and+
+    authentication = authentication and+
+    authentication_pass = authentication_pass and+
+    base_uri = base_uri and+
+    bearer = bearer and+
+    bearer_pass = bearer_pass and+
+    content = content and+
+    content_type = content_type and+
+    data = data and+
+    digest = digest and+
+    dry_run = dry_run and+
+    json = json and+
+    pass = pass and+
+    path = path and+
+    query = query and+
+    raw_form = raw_form and+
+    raw_path = raw_path and+
+    raw_query = raw_query and+
+    user = user and+
+    user_pass = user_pass and+
+    verb = verb and+
     () = Term.(const ())
   in
   let authentication =
@@ -276,11 +276,13 @@ let siesta_t =
   in
   siesta { authentication; base_uri; body; content_type; dry_run; pass; path; query; raw_form; raw_path; raw_query; verb; }
 
+[@@@alert "-deprecated"]
+
 let cmd =
   let doc = "call REST APIs without a hassle" in
-  let info = Cmd.info "siesta" ~version:"%%VERSION%%" ~doc in
-  Cmd.v info siesta_t
+  let info = Term.info "siesta" ~version:"%%VERSION%%" ~doc in
+  siesta_t, info
 
-let main () = exit (Cmd.eval cmd)
+let main () = Term.exit (Term.eval cmd)
 
 let () = main ()
