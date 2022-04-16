@@ -4,23 +4,25 @@
 
 (generate_opam_files true)
 
+(version 1.0)
+
 (source
- (github username/reponame))
+ (github cyborgize/siesta-cli))
 
-(authors "Author Name")
+(authors "Raman Varabets <raman+opam.siesta-cli@cyborgize.sg>")
 
-(maintainers "Maintainer Name")
+(maintainers "Raman Varabets <raman+opam.siesta-cli@cyborgize.sg>")
 
-(license LICENSE)
+(license GPL-3.0-or-later)
 
-(documentation https://url/to/documentation)
+(documentation https://github.com/cyborgize/siesta-cli)
 
 (package
  (name siesta)
- (synopsis "A short synopsis")
- (description "A longer description")
- (depends ocaml dune)
+ (synopsis "Call REST APIs without a hassle")
+ (description "Call REST APIs without a hassle.")
+ (depends ocaml dune base64 cmdliner devkit extlib lwt lwt_ppx)
  (tags
-  (topics "to describe" your project)))
+  (api rest cli "command line")))
 
 ; See the complete stanza docs at https://dune.readthedocs.io/en/stable/dune-files.html#dune-project
