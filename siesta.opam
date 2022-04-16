@@ -1,0 +1,26 @@
+opam-version: "2.0"
+name: "siesta"
+version: "0.1"
+synopsis: "Call REST APIs without a hassle"
+description: """
+Call REST APIs without a hassle.
+"""
+maintainer: "Raman Varabets <raman+opam.siesta-cli@cyborgize.sg>"
+authors: "Raman Varabets <raman+opam.siesta-cli@cyborgize.sg>"
+license: "GPL-3.0-or-later"
+homepage: "https://github.com/cyborgize/siesta-cli"
+bug-reports: "https://github.com/cyborgize/siesta-cli/issues"
+dev-repo: "git+https://github.com/cyborgize/siesta-cli.git"
+depends: [
+  "ocaml" {>= "4.08.0"}
+  "dune" {>= "2.9"}
+  "cmdliner"
+  "devkit"
+  "extlib"
+  "lwt"
+  "lwt_ppx"
+]
+build: [
+  ["dune" "subst" ] {dev}
+  ["dune" "build" "-p" name "-j" jobs]
+]
