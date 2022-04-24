@@ -38,7 +38,7 @@ type config = {
 let siesta { authentication; base_uri; body; content_type; dry_run; pass; path; query; raw_form; raw_path; raw_query; verb; } =
   Lwt_main.run @@
   let add_type type_ map value = String.concat " " [ type_; map value; ] in
-  let basic = add_type "Basic" Digest.(to_hex $ string) in
+  let basic = add_type "Basic" Base64.encode_string in
   let bearer = add_type "Bearer" Fun.id in
   let return_pass map1 map2 name =
     let lines = Lwt_process.pread_lines ("", [| pass; name; |]) in
