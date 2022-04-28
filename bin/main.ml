@@ -59,7 +59,7 @@ let siesta { authentication; base_uri; body; content_type; dry_run; pass; path; 
     | Auth_pass (Bearer, x) -> return_pass Lwt_stream.next (some $ basic) x
     | Auth_pass (Digest, _x) -> Exn.fail "FIXME auth-pass digest not implemented"
   in
-  let authentication = Option.map ((^) "Authentication: ") authentication in
+  let authentication = Option.map ((^) "Authorization: ") authentication in
   let headers = List.filter_map Fun.id [ authentication; ] in
   let encode_uri_component = function true -> Fun.id | false -> Web.urlencode in
   let encode_path_component = encode_uri_component raw_path in
