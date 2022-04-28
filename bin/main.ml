@@ -26,6 +26,8 @@ type config = {
   body : body option;
   content_type : string option;
   dry_run : bool;
+  headers : form_data;
+  headers_pass : form_data;
   pass : string;
   path : string list;
   query : form_data;
@@ -35,7 +37,23 @@ type config = {
   verb : Web.http_action;
 }
 
-let siesta { authentication; base_uri; body; content_type; dry_run; pass; path; query; raw_form; raw_path; raw_query; verb; } =
+let siesta params =
+  let {
+    authentication;
+    base_uri;
+    body;
+    content_type;
+    dry_run;
+    headers;
+    headers_pass;
+    pass;
+    path;
+    query;
+    raw_form;
+    raw_path;
+    raw_query;
+    verb;
+  } = params in
   Lwt_main.run @@
   let add_type type_ map value = String.concat " " [ type_; map value; ] in
   let basic = add_type "Basic" Base64.encode_string in
@@ -43,7 +61,7 @@ let siesta { authentication; base_uri; body; content_type; dry_run; pass; path; 
   let return_pass map1 map2 name =
     let lines = Lwt_process.pread_lines ("", [| pass; name; |]) in
     let%lwt lines = map1 lines in
-    Lwt.wrap1 map2 lines
+    map2 lines
   in
   let%lwt authentication =
     match authentication with
@@ -54,13 +72,33 @@ let siesta { authentication; base_uri; body; content_type; dry_run; pass; path; 
     | Auth (Basic, x) -> Lwt.return_some (basic x)
     | Auth (Bearer, x) -> Lwt.return_some (bearer x)
     | Auth (Digest, _x) -> Exn.fail "FIXME auth digest not implemented"
-    | Auth_pass (Raw, x) -> return_pass Lwt_stream.get Fun.id x
-    | Auth_pass (Basic, x) -> return_pass Lwt_stream.to_list (fun x -> Some (basic (String.concat ":" x))) x
-    | Auth_pass (Bearer, x) -> return_pass Lwt_stream.next (some $ basic) x
+    | Auth_pass (Raw, x) -> return_pass Lwt_stream.get Lwt.return x
+    | Auth_pass (Basic, x) -> return_pass Lwt_stream.to_list (fun x -> Lwt.return_some (basic (String.concat ":" x))) x
+    | Auth_pass (Bearer, x) -> return_pass Lwt_stream.next (Lwt.return_some $ basic) x
     | Auth_pass (Digest, _x) -> Exn.fail "FIXME auth-pass digest not implemented"
   in
   let authentication = Option.map ((^) "Authorization: ") authentication in
-  let headers = List.filter_map Fun.id [ authentication; ] in
+  let map_header key value = String.concat ": " [ key; value; ] in
+  let headers =
+    List.map begin function
+      | key, Some value -> map_header key value
+      | key, None -> key ^ ":"
+    end headers
+  in
+  let%lwt headers =
+    Lwt_list.fold_left_s begin fun acc (key, value) ->
+      match value with
+      | Some value -> return_pass Lwt.return (fun x -> Lwt_stream.fold (fun value acc -> map_header key value :: acc) x acc) value
+      | None -> Lwt.return ((key ^ ":") :: acc)
+    end headers headers_pass
+  in
+  let headers =
+    List.fold_left begin fun acc header ->
+      match header with
+      | Some header -> header :: acc
+      | None -> acc
+    end headers [ authentication; ]
+  in
   let encode_uri_component = function true -> Fun.id | false -> Web.urlencode in
   let encode_path_component = encode_uri_component raw_path in
   let encode_query_component = encode_uri_component raw_query in
@@ -165,6 +203,14 @@ let dry_run =
   let doc = "Dry run, print the API call that would be made." in
   Arg.(value & flag & info ["n"; "dry-run"] ~docv:"DRY_RUN" ~doc)
 
+let headers =
+  let doc = "Specify header for the API call." in
+  Arg.(value & opt_all key_and_value [] & info ["h"; "header"] ~docv:"HEADER" ~doc)
+
+let headers_pass =
+  let doc = "Specify header for the API call using the value retrieved from the password manager." in
+  Arg.(value & opt_all key_and_value [] & info ["H"; "header-pass"] ~docv:"HEADER_PASS" ~doc)
+
 let json =
   let doc = "Specify the json data for the API call." in
   Arg.(value & opt (some string) None & info ["j"; "json"] ~docv:"JSON" ~doc)
@@ -230,6 +276,8 @@ let siesta_t =
     data = data and+
     digest = digest and+
     dry_run = dry_run and+
+    headers = headers and+
+    headers_pass = headers_pass and+
     json = json and+
     pass = pass and+
     path = path and+
@@ -274,7 +322,22 @@ let siesta_t =
     | _ :: _ -> Some (Form data)
     | [] -> None
   in
-  siesta { authentication; base_uri; body; content_type; dry_run; pass; path; query; raw_form; raw_path; raw_query; verb; }
+  siesta {
+    authentication;
+    base_uri;
+    body;
+    content_type;
+    dry_run;
+    headers;
+    headers_pass;
+    pass;
+    path;
+    query;
+    raw_form;
+    raw_path;
+    raw_query;
+    verb;
+  }
 
 [@@@alert "-deprecated"]
 
