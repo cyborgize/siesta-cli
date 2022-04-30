@@ -9,27 +9,27 @@ type authentication_method =
   | Bearer
   | Digest
 
-type authentication =
-  | Auth of authentication_method * string
-  | Auth_pass of authentication_method * string
+type indirect_string =
+  | Immediate of string
+  | File of string
+  | Pass of string
 
-type form_data = (string * string option) list
+type form_data = (string * indirect_string option) list
 
 type body =
-  | Raw of string
+  | Raw of indirect_string
   | Form of form_data
-  | JSON of string
+  | JSON of indirect_string
 
 type config = {
-  authentication : authentication option;
+  authentication : (authentication_method * indirect_string) option;
   base_uri : string;
   body : body option;
   content_type : string option;
   dry_run : bool;
   headers : form_data;
-  headers_pass : form_data;
   pass : string;
-  path : string list;
+  path : indirect_string list;
   query : form_data;
   raw_form : bool;
   raw_path : bool;
@@ -45,7 +45,6 @@ let siesta params =
     content_type;
     dry_run;
     headers;
-    headers_pass;
     pass;
     path;
     query;
@@ -66,31 +65,37 @@ let siesta params =
   let%lwt authentication =
     match authentication with
     | None -> Lwt.return_none
-    | Some authentication ->
-    match authentication with
-    | Auth (Raw, x) -> Lwt.return_some x
-    | Auth (Basic, x) -> Lwt.return_some (basic x)
-    | Auth (Bearer, x) -> Lwt.return_some (bearer x)
-    | Auth (Digest, _x) -> Exn.fail "FIXME auth digest not implemented"
-    | Auth_pass (Raw, x) -> return_pass Lwt_stream.get Lwt.return x
-    | Auth_pass (Basic, x) -> return_pass Lwt_stream.to_list (fun x -> Lwt.return_some (basic (String.concat ":" x))) x
-    | Auth_pass (Bearer, x) -> return_pass Lwt_stream.next (Lwt.return_some $ basic) x
-    | Auth_pass (Digest, _x) -> Exn.fail "FIXME auth-pass digest not implemented"
+    | Some (authentication, x) ->
+    match x with
+    | Immediate x ->
+      begin match authentication with
+      | Raw -> Lwt.return_some x
+      | Basic -> Lwt.return_some (basic x)
+      | Bearer -> Lwt.return_some (bearer x)
+      | Digest -> Exn.fail "FIXME auth digest is not implemented"
+      end
+    | File _x -> Exn.fail "FIXME file indirection is not implemented"
+    | Pass x ->
+      begin match authentication with
+      | Raw -> return_pass Lwt_stream.get Lwt.return x
+      | Basic -> return_pass Lwt_stream.to_list (fun x -> Lwt.return_some (basic (String.concat ":" x))) x
+      | Bearer -> return_pass Lwt_stream.next (Lwt.return_some $ basic) x
+      | Digest -> Exn.fail "FIXME auth digest is not implemented"
+      end
   in
   let authentication = Option.map ((^) "Authorization: ") authentication in
   let map_header key value = String.concat ": " [ key; value; ] in
-  let headers =
-    List.map begin function
-      | key, Some value -> map_header key value
-      | key, None -> key ^ ":"
-    end headers
-  in
   let%lwt headers =
     Lwt_list.fold_left_s begin fun acc (key, value) ->
       match value with
-      | Some value -> return_pass Lwt.return (fun x -> Lwt_stream.fold (fun value acc -> map_header key value :: acc) x acc) value
       | None -> Lwt.return ((key ^ ":") :: acc)
-    end headers headers_pass
+      | Some value ->
+      match value with
+      | Immediate value -> Lwt.return (map_header key value :: acc)
+      | File _value -> Exn_lwt.fail "FIXME file indirection is not implemented"
+      | Pass value ->
+        return_pass Lwt.return (fun x -> Lwt_stream.fold (fun value acc -> map_header key value :: acc) x acc) value
+    end [] headers
   in
   let headers =
     List.fold_left begin fun acc header ->
@@ -98,6 +103,30 @@ let siesta params =
       | Some header -> header :: acc
       | None -> acc
     end headers [ authentication; ]
+  in
+  let map_form_data l =
+    List.rev l |>
+    Lwt_list.fold_left_s begin fun acc (key, value) ->
+      match value with
+      | None -> Lwt.return ((key, None) :: acc)
+      | Some value ->
+      match value with
+      | Immediate value -> Lwt.return ((key, Some value) :: acc)
+      | File _value -> Exn_lwt.fail "FIXME file indirection is not implemented"
+      | Pass value ->
+        return_pass Lwt.return (fun x -> Lwt_stream.fold (fun value acc -> (key, Some value) :: acc) x acc) value
+    end []
+  in
+  let%lwt query = map_form_data query in
+  let%lwt path =
+    List.rev path |>
+    Lwt_list.fold_left_s begin fun acc value ->
+      match value with
+      | Immediate value -> Lwt.return (value :: acc)
+      | File _value -> Exn_lwt.fail "FIXME file indirection is not supported"
+      | Pass value ->
+        return_pass Lwt.return (fun x -> Lwt_stream.fold (fun value acc -> value :: acc) x acc) value
+    end []
   in
   let encode_uri_component = function true -> Fun.id | false -> Web.urlencode in
   let encode_path_component = encode_uri_component raw_path in
@@ -114,15 +143,24 @@ let siesta params =
     | _ :: _ -> String.concat "?" [ full_uri; encode_query encode_query_component query; ]
     | [] -> full_uri
   in
-  let body =
+  let%lwt body =
     match body with
-    | None -> None
+    | None -> Lwt.return_none
     | Some body ->
     let raw default_content_type content = Some (`Raw (Option.default default_content_type content_type, content)) in
     match body with
-    | Raw _ -> Exn.fail "FIXME raw body not implemented"
-    | Form x -> raw "application/x-www-form-urlencoded" (encode_query encode_form_component x)
-    | JSON x -> raw "application/json" x
+    | Raw _ -> Exn_lwt.fail "FIXME raw body not implemented"
+    | Form x ->
+      let%lwt x = map_form_data x in
+      Lwt.wrap2 raw "application/x-www-form-urlencoded" (encode_query encode_form_component x)
+    | JSON x ->
+      let%lwt x =
+        match x with
+        | Immediate value -> Lwt.return value
+        | File _value -> Exn_lwt.fail "FIXME file indirection is not supported"
+        | Pass value -> return_pass Lwt_stream.next Lwt.return value
+      in
+      Lwt.wrap2 raw "application/json" x
   in
   match dry_run with
   | true ->
@@ -135,8 +173,42 @@ let siesta params =
 
 open Cmdliner
 
+let indirect_string =
+  let parse = Arg.(conv_parser string) in
+  let parse x =
+    match parse x with
+    | Error _ as error -> error
+    | Ok x ->
+    let len = String.length x in
+    match len = 0 with
+    | true -> Ok (Immediate x)
+    | false ->
+    let sub len x = String.sub x 1 (pred len) in
+    match String.unsafe_get x 0 with
+    | '=' -> Ok (Immediate (sub len x))
+    | '@' -> Ok (File (sub len x))
+    | '!' -> Ok (Pass (sub len x))
+    | _ -> Ok (Immediate x)
+  in
+  let print = Arg.(conv_printer string) in
+  let print fmt x =
+    match x with
+    | File x -> print fmt ("@" ^ x)
+    | Pass x -> print fmt ("!" ^ x)
+    | Immediate x ->
+    let starts_with_special x =
+      match String.unsafe_get x 0 with
+      | '=' | '@' | '!' -> true
+      | _ -> false
+    in
+    match String.equal x "" || not (starts_with_special x) with
+    | true -> print fmt x
+    | false -> print fmt ("=" ^ x)
+  in
+  Arg.conv (parse, print)
+
 let key_and_value =
-  let key_and_value = Arg.(pair ~sep:'=' string string) in
+  let key_and_value = Arg.(pair ~sep:'=' string indirect_string) in
   let parse = Arg.(conv_parser key_and_value) in
   let parse x =
     match String.contains x '=' with
@@ -156,11 +228,7 @@ let key_and_value =
 
 let authentication =
   let doc = "Specify the raw authentication." in
-  Arg.(value & opt (some string) None & info ["a"; "auth"] ~docv:"AUTH" ~doc)
-
-let authentication_pass =
-  let doc = "Specify the raw authentication using the value retrieved from the password manager." in
-  Arg.(value & opt (some string) None & info ["A"; "auth-pass"] ~docv:"AUTH_PASS" ~doc)
+  Arg.(value & opt (some indirect_string) None & info ["a"; "auth"] ~docv:"AUTH" ~doc)
 
 let base_uri =
   let doc = "Specify the base URI for the API call." in
@@ -177,15 +245,11 @@ let base_uri =
 
 let bearer =
   let doc = "Specify the bearer token for OAuth2 server authentication." in
-  Arg.(value & opt (some string) None & info ["b"; "bearer"] ~docv:"BEARER" ~doc)
-
-let bearer_pass =
-  let doc = "Specify the bearer token for OAuth2 server authentication using the value retrieved from the password manager." in
-  Arg.(value & opt (some string) None & info ["B"; "bearer-pass"] ~docv:"BEARER_PASS" ~doc)
+  Arg.(value & opt (some indirect_string) None & info ["b"; "bearer"] ~docv:"BEARER" ~doc)
 
 let content =
   let doc = "Specify the content for the API call." in
-  Arg.(value & opt (some string) None & info ["c"; "content"] ~docv:"CONTENT" ~doc)
+  Arg.(value & opt (some indirect_string) None & info ["c"; "content"] ~docv:"CONTENT" ~doc)
 
 let content_type =
   let doc = "Specify the content type for the API call." in
@@ -207,13 +271,9 @@ let headers =
   let doc = "Specify header for the API call." in
   Arg.(value & opt_all key_and_value [] & info ["h"; "header"] ~docv:"HEADER" ~doc)
 
-let headers_pass =
-  let doc = "Specify header for the API call using the value retrieved from the password manager." in
-  Arg.(value & opt_all key_and_value [] & info ["H"; "header-pass"] ~docv:"HEADER_PASS" ~doc)
-
 let json =
   let doc = "Specify the json data for the API call." in
-  Arg.(value & opt (some string) None & info ["j"; "json"] ~docv:"JSON" ~doc)
+  Arg.(value & opt (some indirect_string) None & info ["j"; "json"] ~docv:"JSON" ~doc)
 
 let pass =
   let doc = "Specify the password manager program to use." in
@@ -221,7 +281,7 @@ let pass =
 
 let path =
   let doc = "Specify the HTTP request path for the API call." in
-  Arg.(value & pos_right 1 string [] & info [] ~docv:"API_PATH" ~doc)
+  Arg.(value & pos_right 1 indirect_string [] & info [] ~docv:"API_PATH" ~doc)
 
 let query =
   let doc = "Specify the query for the API call." in
@@ -241,11 +301,7 @@ let raw_query =
 
 let user =
   let doc = "Specify the user authentication." in
-  Arg.(value & opt (some string) None & info ["u"; "user"] ~docv:"USERAUTH" ~doc)
-
-let user_pass =
-  let doc = "Specify the user authentication using the value retrieved from the password manager." in
-  Arg.(value & opt (some string) None & info ["U"; "user-pass"] ~docv:"USERAUTH_PASS" ~doc)
+  Arg.(value & opt (some indirect_string) None & info ["u"; "user"] ~docv:"USERAUTH" ~doc)
 
 let verb =
   let doc = "Specify the HTTP request verb for the API call." in
@@ -267,17 +323,14 @@ let siesta_t =
   let (and+) x y = Term.(const (fun x y -> x, y) $ x $ y) in
   let+
     authentication = authentication and+
-    authentication_pass = authentication_pass and+
     base_uri = base_uri and+
     bearer = bearer and+
-    bearer_pass = bearer_pass and+
     content = content and+
     content_type = content_type and+
     data = data and+
     digest = digest and+
     dry_run = dry_run and+
     headers = headers and+
-    headers_pass = headers_pass and+
     json = json and+
     pass = pass and+
     path = path and+
@@ -286,29 +339,19 @@ let siesta_t =
     raw_path = raw_path and+
     raw_query = raw_query and+
     user = user and+
-    user_pass = user_pass and+
     verb = verb and+
     () = Term.(const ())
   in
   let authentication =
     match authentication with
-    | Some x -> Some (Auth (Raw, x))
-    | None ->
-    match authentication_pass with
-    | Some x -> Some (Auth_pass (Raw, x))
+    | Some x -> Some ((Raw : authentication_method), x)
     | None ->
     match bearer with
-    | Some x -> Some (Auth (Bearer, x))
-    | None ->
-    match bearer_pass with
-    | Some x -> Some (Auth_pass (Bearer, x))
+    | Some x -> Some (Bearer, x)
     | None ->
     let auth = if digest then Digest else Basic in
     match user with
-    | Some x -> Some (Auth (auth, x))
-    | None ->
-    match user_pass with
-    | Some x -> Some (Auth_pass (auth, x))
+    | Some x -> Some (auth, x)
     | None -> None
   in
   let body =
@@ -329,7 +372,6 @@ let siesta_t =
     content_type;
     dry_run;
     headers;
-    headers_pass;
     pass;
     path;
     query;
