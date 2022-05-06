@@ -164,22 +164,54 @@ let siesta params =
     match body with
     | None -> Lwt.return_none
     | Some body ->
-    let raw default_content_type content = Some (`Raw (Option.default default_content_type content_type, content)) in
-    let indirect = function
-      | Immediate value -> Lwt.return value
-      | File value' -> Lwt_io.with_file ~mode:Input value' Lwt_io.read
-      | Pass value -> return_pass Lwt_process.pread (Map { map1 = Lwt.return; map2 = Lwt.return; }) value
+    let raw detect_content_type content =
+      let%lwt content_type =
+        match content_type with
+        | Some content_type -> Lwt.return content_type
+        | None -> detect_content_type ()
+      in
+      Lwt.return_some (`Raw (content_type, content))
+    in
+    let json_mime_type = "application/json" in
+    let detect_content_type name () =
+      Lwt_process.pread_line ("", [| "file"; "--brief"; "--dereference"; "--mime-type"; name; |])
+    in
+    let indirect ?(force_default_content_type=false) default_content_type = function
+      | Immediate value -> Lwt.return (const (Lwt.return default_content_type), value)
+      | File value' ->
+        let%lwt value = Lwt_io.with_file ~mode:Input value' Lwt_io.read in
+        let detect_content_type =
+          match force_default_content_type with
+          | false -> detect_content_type
+          | true ->
+          let detect_content_type name () =
+            let%lwt content_type = detect_content_type name () in
+            let%lwt () =
+              match String.equal content_type default_content_type with
+              | true -> Lwt.return_unit
+              | false ->
+                Lwt_io.eprintlf "WARN: detected content type of `%s' is %s, using %s instead" value' content_type json_mime_type
+            in
+            Lwt.return default_content_type
+          in
+          detect_content_type
+        in
+        Lwt.return (detect_content_type value, value)
+      | Pass value ->
+        let%lwt value = return_pass Lwt_process.pread (Map { map1 = Lwt.return; map2 = Lwt.return; }) value in
+        Lwt.return (const (Lwt.return default_content_type), value)
     in
     match body with
     | Raw x ->
-      let%lwt x = indirect x in
-      Lwt.wrap2 raw "application/octet-stream" x
+      let%lwt (detect_content_type, x) = indirect "application/octet-stream" x in
+      raw detect_content_type x
     | Form x ->
       let%lwt x = map_form_data x in
-      Lwt.wrap2 raw "application/x-www-form-urlencoded" (encode_query encode_form_component x)
-    | JSON x ->
-      let%lwt x = indirect x in
-      Lwt.wrap2 raw "application/json" x
+      let content_type = const (Lwt.return "application/x-www-form-urlencoded") in
+      raw content_type (encode_query encode_form_component x)
+    | JSON x' ->
+      let%lwt (detect_content_type, x) = indirect ~force_default_content_type:true json_mime_type x' in
+      raw detect_content_type x
   in
   match dry_run with
   | true ->
