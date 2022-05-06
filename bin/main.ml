@@ -164,12 +164,15 @@ let siesta params =
   in
   match dry_run with
   | true ->
-    let%lwt () = Lwt_io.eprintlf "siesta: %s %s" (Web.string_of_http_action verb) full_uri in
+    (* TODO also print if verbose *)
+    let%lwt () = Lwt_io.eprintlf "%s %s" (Web.string_of_http_action verb) full_uri in
     Lwt.return_unit
   | false ->
   match%lwt Web.http_request_lwt' ~headers ?body verb full_uri with
-  | `Ok (code, s) -> Lwt_io.eprintlf "siesta: %d %s" code s
-  | `Error code -> Lwt_io.eprintlf "siesta: curl error (%d) %s" (Curl.int_of_curlCode code) (Curl.strerror code)
+  | `Ok (_code, s) ->
+    (* TODO print HTTP code if verbose *)
+    Lwt_io.printl s
+  | `Error code -> Lwt_io.eprintlf "ERROR: curl error (%d) %s" (Curl.int_of_curlCode code) (Curl.strerror code)
 
 open Cmdliner
 
