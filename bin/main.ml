@@ -37,6 +37,9 @@ type config = {
   verb : Web.http_action;
 }
 
+type ('a, 'c) e =
+  | Map : { map1 : 'a -> 'b Lwt.t; map2 : 'b -> 'c Lwt.t; } -> ('a, 'c) e
+
 let siesta params =
   let {
     authentication;
@@ -57,15 +60,29 @@ let siesta params =
   let add_type type_ map value = String.concat " " [ type_; map value; ] in
   let basic = add_type "Basic" Base64.encode_string in
   let bearer = add_type "Bearer" Fun.id in
-  let return_pass map1 map2 name =
-    let lines = Lwt_process.pread_lines ("", [| pass; name; |]) in
+  let return_file map0 (Map { map1; map2; }) name =
+    Lwt_io.with_file ~mode:Input name @@ fun io ->
+    let%lwt lines = map0 io in
     let%lwt lines = map1 lines in
     map2 lines
   in
+  let return_file_lines map name = return_file (Lwt.wrap1 Lwt_io.read_lines) map name in
+  let return_pass map0 (Map { map1; map2; }) name =
+    let%lwt lines = map0 ("", [| pass; name; |]) in
+    let%lwt lines = map1 lines in
+    map2 lines
+  in
+  let return_pass_lines map name = return_pass (Lwt.wrap1 Lwt_process.pread_lines) map name in
   let%lwt authentication =
     match authentication with
     | None -> Lwt.return_none
     | Some (authentication, x) ->
+    let indirect = function
+      | (Raw : authentication_method) -> Map { map1 = Lwt_stream.get; map2 = Lwt.return; }
+      | Basic -> Map { map1 = Lwt_stream.to_list; map2 = (fun x -> Lwt.return_some (basic (String.concat ":" x))); }
+      | Bearer -> Map { map1 = Lwt_stream.next; map2 = Lwt.return_some $ basic; }
+      | Digest -> Exn.fail "FIXME auth digest is not implemented"
+    in
     match x with
     | Immediate x ->
       begin match authentication with
@@ -74,27 +91,23 @@ let siesta params =
       | Bearer -> Lwt.return_some (bearer x)
       | Digest -> Exn.fail "FIXME auth digest is not implemented"
       end
-    | File _x -> Exn.fail "FIXME file indirection is not implemented"
-    | Pass x ->
-      begin match authentication with
-      | Raw -> return_pass Lwt_stream.get Lwt.return x
-      | Basic -> return_pass Lwt_stream.to_list (fun x -> Lwt.return_some (basic (String.concat ":" x))) x
-      | Bearer -> return_pass Lwt_stream.next (Lwt.return_some $ basic) x
-      | Digest -> Exn.fail "FIXME auth digest is not implemented"
-      end
+    | File x -> return_file_lines (indirect authentication) x
+    | Pass x -> return_pass_lines (indirect authentication) x
   in
   let authentication = Option.map ((^) "Authorization: ") authentication in
   let map_header key value = String.concat ": " [ key; value; ] in
   let%lwt headers =
+    let indirect key acc =
+      Map { map1 = Lwt.return; map2 = (fun x -> Lwt_stream.fold (fun value acc -> map_header key value :: acc) x acc); }
+    in
     Lwt_list.fold_left_s begin fun acc (key, value) ->
       match value with
       | None -> Lwt.return ((key ^ ":") :: acc)
       | Some value ->
       match value with
       | Immediate value -> Lwt.return (map_header key value :: acc)
-      | File _value -> Exn_lwt.fail "FIXME file indirection is not implemented"
-      | Pass value ->
-        return_pass Lwt.return (fun x -> Lwt_stream.fold (fun value acc -> map_header key value :: acc) x acc) value
+      | File value -> return_file_lines (indirect key acc) value (* FIXME duplicate headers *)
+      | Pass value -> return_pass_lines (indirect key acc) value
     end [] headers
   in
   let headers =
@@ -105,6 +118,9 @@ let siesta params =
     end headers [ authentication; ]
   in
   let map_form_data l =
+    let indirect key acc =
+      Map { map1 = Lwt.return; map2 = (fun x -> Lwt_stream.fold (fun value acc -> (key, Some value) :: acc) x acc); }
+    in
     List.rev l |>
     Lwt_list.fold_left_s begin fun acc (key, value) ->
       match value with
@@ -112,20 +128,21 @@ let siesta params =
       | Some value ->
       match value with
       | Immediate value -> Lwt.return ((key, Some value) :: acc)
-      | File _value -> Exn_lwt.fail "FIXME file indirection is not implemented"
-      | Pass value ->
-        return_pass Lwt.return (fun x -> Lwt_stream.fold (fun value acc -> (key, Some value) :: acc) x acc) value
+      | File value -> return_file_lines (indirect key acc) value
+      | Pass value -> return_pass_lines (indirect key acc) value
     end []
   in
   let%lwt query = map_form_data query in
   let%lwt path =
+    let indirect acc =
+      Map { map1 = Lwt.return; map2 = (fun x -> Lwt_stream.fold (fun value acc -> value :: acc) x acc); }
+    in
     List.rev path |>
     Lwt_list.fold_left_s begin fun acc value ->
       match value with
       | Immediate value -> Lwt.return (value :: acc)
-      | File _value -> Exn_lwt.fail "FIXME file indirection is not supported"
-      | Pass value ->
-        return_pass Lwt.return (fun x -> Lwt_stream.fold (fun value acc -> value :: acc) x acc) value
+      | File value -> return_file_lines (indirect acc) value
+      | Pass value -> return_pass_lines (indirect acc) value
     end []
   in
   let encode_uri_component = function true -> Fun.id | false -> Web.urlencode in
@@ -148,18 +165,20 @@ let siesta params =
     | None -> Lwt.return_none
     | Some body ->
     let raw default_content_type content = Some (`Raw (Option.default default_content_type content_type, content)) in
+    let indirect = function
+      | Immediate value -> Lwt.return value
+      | File value' -> Lwt_io.with_file ~mode:Input value' Lwt_io.read
+      | Pass value -> return_pass Lwt_process.pread (Map { map1 = Lwt.return; map2 = Lwt.return; }) value
+    in
     match body with
-    | Raw _ -> Exn_lwt.fail "FIXME raw body not implemented"
+    | Raw x ->
+      let%lwt x = indirect x in
+      Lwt.wrap2 raw "application/octet-stream" x
     | Form x ->
       let%lwt x = map_form_data x in
       Lwt.wrap2 raw "application/x-www-form-urlencoded" (encode_query encode_form_component x)
     | JSON x ->
-      let%lwt x =
-        match x with
-        | Immediate value -> Lwt.return value
-        | File _value -> Exn_lwt.fail "FIXME file indirection is not supported"
-        | Pass value -> return_pass Lwt_stream.next Lwt.return value
-      in
+      let%lwt x = indirect x in
       Lwt.wrap2 raw "application/json" x
   in
   match dry_run with
