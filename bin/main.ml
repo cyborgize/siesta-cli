@@ -11,6 +11,7 @@ type authentication_method =
 
 type indirect_string =
   | Immediate of string
+  | Env of string
   | File of string
   | Pass of string
 
@@ -60,6 +61,11 @@ let siesta params =
   let add_type type_ map value = String.concat " " [ type_; map value; ] in
   let basic = add_type "Basic" Base64.encode_string in
   let bearer = add_type "Bearer" Fun.id in
+  let return_env_lines (Map { map1; map2; }) name =
+    let lines = Lwt_stream.of_list (try [ Sys.getenv name; ] with Not_found -> []) in
+    let%lwt lines = map1 lines in
+    map2 lines
+  in
   let return_file map0 (Map { map1; map2; }) name =
     Lwt_io.with_file ~mode:Input name @@ fun io ->
     let%lwt lines = map0 io in
@@ -91,6 +97,7 @@ let siesta params =
       | Bearer -> Lwt.return_some (bearer x)
       | Digest -> Exn.fail "FIXME auth digest is not implemented"
       end
+    | Env x -> return_env_lines (indirect authentication) x
     | File x -> return_file_lines (indirect authentication) x
     | Pass x -> return_pass_lines (indirect authentication) x
   in
@@ -106,6 +113,7 @@ let siesta params =
       | Some value ->
       match value with
       | Immediate value -> Lwt.return (map_header key value :: acc)
+      | Env value -> return_env_lines (indirect key acc) value (* FIXME embedded newlines *)
       | File value -> return_file_lines (indirect key acc) value (* FIXME duplicate headers *)
       | Pass value -> return_pass_lines (indirect key acc) value
     end [] headers
@@ -128,6 +136,7 @@ let siesta params =
       | Some value ->
       match value with
       | Immediate value -> Lwt.return ((key, Some value) :: acc)
+      | Env value -> return_env_lines (indirect key acc) value
       | File value -> return_file_lines (indirect key acc) value
       | Pass value -> return_pass_lines (indirect key acc) value
     end []
@@ -141,6 +150,7 @@ let siesta params =
     Lwt_list.fold_left_s begin fun acc value ->
       match value with
       | Immediate value -> Lwt.return (value :: acc)
+      | Env value -> return_env_lines (indirect acc) value
       | File value -> return_file_lines (indirect acc) value
       | Pass value -> return_pass_lines (indirect acc) value
     end []
@@ -178,6 +188,15 @@ let siesta params =
     in
     let indirect ?(force_default_content_type=false) default_content_type = function
       | Immediate value -> Lwt.return (const (Lwt.return default_content_type), value)
+      | Env value ->
+        let%lwt value =
+          match Sys.getenv value with
+          | value -> Lwt.return value
+          | exception Not_found ->
+            let%lwt () = Lwt_io.eprintlf "WARN: environment variable `%s' is not set, using empty value" value in
+            Lwt.return ""
+        in
+        Lwt.return (const (Lwt.return default_content_type), value)
       | File value' ->
         let%lwt value = Lwt_io.with_file ~mode:Input value' Lwt_io.read in
         let detect_content_type =
@@ -240,6 +259,7 @@ let indirect_string =
     let sub len x = String.sub x 1 (pred len) in
     match String.unsafe_get x 0 with
     | '=' -> Ok (Immediate (sub len x))
+    | '$' -> Ok (Env (sub len x))
     | '@' -> Ok (File (sub len x))
     | '!' -> Ok (Pass (sub len x))
     | _ -> Ok (Immediate x)
@@ -247,6 +267,7 @@ let indirect_string =
   let print = Arg.(conv_printer string) in
   let print fmt x =
     match x with
+    | Env x -> print fmt ("$" ^ x)
     | File x -> print fmt ("@" ^ x)
     | Pass x -> print fmt ("!" ^ x)
     | Immediate x ->
