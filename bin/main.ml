@@ -14,6 +14,7 @@ type indirect_string =
   | Env of string
   | File of string
   | Pass of string
+  | Stdin
 
 type form_data = (string * indirect_string option) list
 
@@ -66,11 +67,14 @@ let siesta params =
     let%lwt lines = map1 lines in
     map2 lines
   in
-  let return_file map0 (Map { map1; map2; }) name =
-    Lwt_io.with_file ~mode:Input name @@ fun io ->
+  let return_file_io map0 (Map { map1; map2; }) io =
     let%lwt lines = map0 io in
     let%lwt lines = map1 lines in
     map2 lines
+  in
+  let return_file map0 map name =
+    Lwt_io.with_file ~mode:Input name @@ fun io ->
+    return_file_io map0 map io
   in
   let return_file_lines map name = return_file (Lwt.wrap1 Lwt_io.read_lines) map name in
   let return_pass map0 (Map { map1; map2; }) name =
@@ -79,6 +83,7 @@ let siesta params =
     map2 lines
   in
   let return_pass_lines map name = return_pass (Lwt.wrap1 Lwt_process.pread_lines) map name in
+  let return_stdin_lines map = return_file_io (Lwt.wrap1 Lwt_io.read_lines) map Lwt_io.stdin in
   let%lwt authentication =
     match authentication with
     | None -> Lwt.return_none
@@ -100,6 +105,7 @@ let siesta params =
     | Env x -> return_env_lines (indirect authentication) x
     | File x -> return_file_lines (indirect authentication) x
     | Pass x -> return_pass_lines (indirect authentication) x
+    | Stdin -> return_stdin_lines (indirect authentication)
   in
   let authentication = Option.map ((^) "Authorization: ") authentication in
   let map_header key value = String.concat ": " [ key; value; ] in
@@ -116,6 +122,7 @@ let siesta params =
       | Env value -> return_env_lines (indirect key acc) value (* FIXME embedded newlines *)
       | File value -> return_file_lines (indirect key acc) value (* FIXME duplicate headers *)
       | Pass value -> return_pass_lines (indirect key acc) value
+      | Stdin -> return_stdin_lines (indirect key acc)
     end [] headers
   in
   let headers =
@@ -139,6 +146,7 @@ let siesta params =
       | Env value -> return_env_lines (indirect key acc) value
       | File value -> return_file_lines (indirect key acc) value
       | Pass value -> return_pass_lines (indirect key acc) value
+      | Stdin -> return_stdin_lines (indirect key acc)
     end []
   in
   let%lwt query = map_form_data query in
@@ -153,6 +161,7 @@ let siesta params =
       | Env value -> return_env_lines (indirect acc) value
       | File value -> return_file_lines (indirect acc) value
       | Pass value -> return_pass_lines (indirect acc) value
+      | Stdin -> return_stdin_lines (indirect acc)
     end []
   in
   let encode_uri_component = function true -> Fun.id | false -> Web.urlencode in
@@ -219,6 +228,9 @@ let siesta params =
       | Pass value ->
         let%lwt value = return_pass Lwt_process.pread (Map { map1 = Lwt.return; map2 = Lwt.return; }) value in
         Lwt.return (const (Lwt.return default_content_type), value)
+      | Stdin ->
+        let%lwt value = Lwt_io.read Lwt_io.stdin in
+        Lwt.return (const (Lwt.return default_content_type), value)
     in
     match body with
     | Raw x ->
@@ -260,6 +272,7 @@ let indirect_string =
     match String.unsafe_get x 0 with
     | '=' -> Ok (Immediate (sub len x))
     | '$' -> Ok (Env (sub len x))
+    | '@' when x = "@-" -> Ok Stdin
     | '@' -> Ok (File (sub len x))
     | '!' -> Ok (Pass (sub len x))
     | _ -> Ok (Immediate x)
@@ -268,8 +281,10 @@ let indirect_string =
   let print fmt x =
     match x with
     | Env x -> print fmt ("$" ^ x)
+    | File x when String.length x > 0 && String.unsafe_get x 0 = '-' -> print fmt ("@./" ^ x)
     | File x -> print fmt ("@" ^ x)
     | Pass x -> print fmt ("!" ^ x)
+    | Stdin -> print fmt "@-"
     | Immediate x ->
     let starts_with_special x =
       match String.unsafe_get x 0 with
